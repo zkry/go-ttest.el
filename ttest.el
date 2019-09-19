@@ -102,6 +102,7 @@ Return nil if no block found."
 
 (defun go-ttest--find-case (parse)
   "Return (Pair location (or 'on 'off)) of where point was found in PARSE."
+  (unless (go-ttest--table-at-idx parse) (error "No test case found under point."))
   (nth (go-ttest--table-at-idx parse) (go-ttest--table-case-locs parse)))
 
 ;; Description of algorithm:
@@ -130,12 +131,17 @@ Return nil if no block found."
 	  ct)))
 
 (cl-defstruct go-ttest--table
+  buffer
   ;; The type of the table test. Will either be 'slice or 'map
   type
   
   ;; A pair with car element name of name field and cdr order (stringp integerp).
   ;; nil if no name field exists.
   name-field
+
+  ;; A list of (or stringp nil) of same lenght as case-locs corresponding to the found
+  ;; name of the test case.
+  names
 
   ;; A list of pairs with car being the position of line and cdr 'on if not commented,
   ;; 'off if commented (integerp (or 'on off))
@@ -155,6 +161,7 @@ Return nil if no block found."
   (save-excursion
 	(let ((test-type (go-ttest--line-is-ttest-decl (thing-at-point 'line t)))
 		  (name-name nil)
+		  (names '())
 		  (case-types '())
 		  (base-indent-ct 0)
 		  (case-locs '())
@@ -171,7 +178,7 @@ Return nil if no block found."
 			(let ((n (match-string 1 line))
 				  (tp (match-string 2 line)))
 			  (setq case-types (append case-types (list (cons n tp))))
-			  (when (and (string-match "[Nn]ame" 1) (not name-name))
+			  (when (and (equal test-type 'slice) (string-match "[Nn]ame" n) (not name-name))
 				(setq name-name (cons n i)))
 			  (setq i (1+ i)))))
 		(forward-line))
@@ -185,25 +192,43 @@ Return nil if no block found."
 			;; Select the appropriate regexp to find the beginning of test case.
 			(entry-begin-str (cond ((equal test-type 'slice)
 									(concat (apply #'concat (make-list (1+ base-indent-ct) "\t"))
-											"\\(//[ \t]*\\)?{"))
+											"\\(?://[ \t]*\\)?{"))
 								   ((equal test-type 'map)
 									(concat (apply #'concat (make-list (1+ base-indent-ct) "\t"))
-											"\\(//[ \t]*\\)?\\(}, \\)?\".*\": {")))))
+											"\\(?://[ \t]*\\)?\\(?:}, \\)?\"\\(.*\\)\": {"))))
+			(found-name nil))
 		;; We're at the beginning of all of the test cases; repeat until all cases have been iterated over.
 		(while (not (looking-at ending-str))
+		  ;; Check if we're looking at the name field
+		  (when (and (equal test-type 'slice)
+					 name-name
+					 (string-match (concat (apply #'concat (make-list (+ 2 base-indent-ct) "\t"))
+										   "\\(?://[[:blank:]]*\\)?"
+										   (car name-name) ":.*\"\\(.*\\)\"")
+								   (thing-at-point 'line t)))
+			(setq found-name (match-string 1 (thing-at-point 'line t))))
 		  (when (looking-at entry-begin-str)
+			;; Extract Name before case-locs.
+			(when (and (equal test-type 'map) (string-match entry-begin-str (thing-at-point 'line t)))
+			  (setq found-name (match-string 1 (thing-at-point 'line t))))
 			(let ((is-commented (string-match "^[ \t]*//[ \t]*.*{" (thing-at-point 'line t))))
 			  ;; Check if we passed start-pos
 			  (setq case-locs (append case-locs (list (cons (point) (if is-commented 'off 'on)))))
+			  ;; Check if cursor position is in range
 			  (when (and (> start-pos case-start-loc)
 						 (< start-pos (point))
 						 (not at-idx))
-				(setq at-idx (- (length case-locs) 2)))))
+				(setq at-idx (- (length case-locs) 2)))
+			  ;; Manage test name list (maps find name before loc is added, slices after)
+			  (setq names (append names (list found-name)))))
 		  (forward-line))
+		(when (equal test-type 'slice) (setq names (append names (list found-name))))
 		(when (and (> start-pos case-start-loc) (<= start-pos (point)) (not at-idx))
 		  (setq at-idx (1- (length case-locs)))))
-	  (make-go-ttest--table :type test-type
+	  (make-go-ttest--table :buffer (current-buffer)
+							:type test-type
 							:name-field name-name
+							:names (if (equal test-type 'slice) (cdr names) names)
 							:case-locs case-locs
 							:at-idx at-idx
 							:case-types case-types
@@ -266,22 +291,34 @@ non-nil if changed."
 If LOC is provided, turn of the case at LOC.  Retrun non-nil if changed."
   (go-ttest--apply-comment-func parse (if loc loc (car (go-ttest--find-case parse))) "}"))
 
+(defun go-ttest--case-delete (parse &optional loc)
+  "Delete test-case at position LOC and parse PARSE.
+
+If LOC is provided, turn on the case at position LOC.  Return
+non-nil if changed."
+  (go-ttest--apply-comment-func parse
+								(if loc loc (car (go-ttest--find-case parse)))
+								"\\(//\\)? *}" ;; TODO structs in test-case cause problems
+								#'kill-whole-line))
+
 ;; TODO `comment-line' doesn't seem to comment the line 100% to gofmt standards.
 ;;         It may be necessarry to write my own version of the function.
-(defun go-ttest--apply-comment-func (parse pos stop-regexp)
+(defun go-ttest--apply-comment-func (parse pos stop-regexp &optional func)
   "Apply the `comment-line' func starting at POS.
 
 Apply the `comment-line' func to PARSE struct, stopping applying
 at STOP-REGEXP."
+  (unless func (setq func #'comment-line))
   (save-excursion
 	(goto-char pos)
 	;; Now we should be at the base of the case
-	(comment-line 1) (beginning-of-line)
+	(apply func (list 1)) (beginning-of-line)
 	(while (not (looking-at (concat (apply #'concat
 										   (make-list (1+ (go-ttest--table-indent-ct parse)) "\t"))
 									stop-regexp)))
-	  (comment-line 1) (beginning-of-line))
-	(comment-line 1)
+	  (apply func (list 1))
+	  (beginning-of-line))
+	(apply func (list 1))
 	t))
 
 (defun go-ttest--apply-comment-func-all (parse do-symbol do-func)
@@ -355,27 +392,101 @@ DO-FUNC is then ran on applicable lines."
 	(forward-line -1)
 	(yas-expand-snippet template)))
 
-;; NOTES:
-;; buffer-live-p: Test to see whether a buffer is live or not. The buffer is stored in a defvar.
-;; with-current-buffer: Performs the functions in the body on the buffer.
-;; (read-only-mode): Starter mode to view message.
-;; (let ((inhibit-read-only t)) (erase-buffer) (local-set-key (kbd "q") 'kill-buffer-and-window) (insert ...))
-;; [[file:~/dev/mu/mu4e/mu4e-headers.el::(if%20(eq%20mu4e-split-view%20'single-window)][Creating a new header]]
+(defun go-ttest-add-field ()
+  "TODO."
+  (interactive))
+
+(defun go-ttest-remove-field ()
+  "TODO."
+  (interactive))
+
+;;; go-ttest interactive command ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defvar go-ttest--state '()
+  "Stores the state of the buffer when running the go-ttest.
+State is then used to perform bulk operations.")
+
+(defun go-ttest--buf-refresh (parse)
+  "Redraw the minibuffer according to PARSE."
+  (let ((test-states (mapcar #'cdr (go-ttest--table-case-locs parse)))
+		(test-names (go-ttest--table-names parse))
+		(inhibit-read-only t)
+		(current-line (line-number-at-pos)))
+	(erase-buffer)
+	(setq-local go-ttest--state (cons parse '(make-list (length test-names) nil)))
+	(dotimes (i (length test-states))
+	  (let ((name (nth i test-names))
+			(state (nth i test-states)))
+		(insert (format "   %2s %-50s"
+						(if (equal state 'off) "//" "")
+						(if name name (format "Unnamed Test %d" i))))
+		(when (< i (1- (length test-states))) (insert "\n"))))
+	(goto-char (point-min))
+	(forward-line (1- current-line))))
+
+(defun go-ttest--buf-case-at-line (parse)
+  "In go-ttest special buffer, obtain the test-case of the test at point for PARSE."
+  (let* ((line-no (line-number-at-pos)))
+	(and parse (nth (1- line-no) (go-ttest--table-case-locs parse)))))
+
+(defun go-ttest--buf-comment-case ()
+  "In go-ttest special buffer, comment test case of test at point."
+  (interactive)
+  (go-ttest--buf-case-action 'off))
+
+(defun go-ttest--buf-uncomment-case ()
+  "In go-ttest special buffer, comment test case of test at point."
+  (interactive)
+  (go-ttest--buf-case-action 'on))
+
+(defun go-ttest--buf-delete-case ()
+  "In go-ttest special buffer, comment test case of test at point."
+  (interactive)
+  (go-ttest--buf-case-action 'delete))
+
+(defun go-ttest--buf-case-action (action)
+  "In go-ttest special buffer, uncomment testcase at point if ACTION is 'on.
+If ACTION IS 'off comment out the case, if ACTION is
+'delete, delete the test."
+  (let* ((parse (car go-ttest--state))
+		 (case (go-ttest--buf-case-at-line parse))
+		 (buffer (go-ttest--table-buffer parse))
+		 (action-func (cond ((equal action 'on) #'go-ttest--case-on)
+							((equal action 'off) #'go-ttest--case-off)
+							((equal action 'delete) #'go-ttest--case-delete))))
+	(unless case (error "Unable to find test under point"))
+	(if (equal (cdr case) action)
+		(beep)
+	  (with-current-buffer buffer
+		(apply action-func (list parse (car case)))
+		(goto-char (go-ttest--table-start-pos parse))
+		(setq parse (go-ttest--find-parse)))
+	  (go-ttest--buf-refresh parse))))
+
 (defun go-ttest ()
   "Open a buffer to interactivley modify all of the table test cases."
   (interactive)
   (let* ((parse (go-ttest--find-parse))
-		 (test-cases (go-ttest--table-case-locs parse))
-		 (viewwin (split-window-vertically (- (1+ (length test-cases))))))
+		 (test-states (mapcar #'cdr (go-ttest--table-case-locs parse)))
+		 (test-names (go-ttest--table-names parse))
+		 (buffer (get-buffer-create "*go-table-test-cases*"))
+		 (viewwin (or (get-buffer-window buffer)
+					  (split-window-vertically (min -4 (- (1+ (length test-states))))))))
 	(select-window viewwin)
-	(switch-to-buffer (get-buffer-create "*go-table-test-cases*"))
+	(switch-to-buffer buffer)
+
 	(read-only-mode)
-	(let ((inhibit-read-only t))
-	  (erase-buffer)
-	  (local-set-key (kbd "q") 'kill-buffer-and-window)
-	  (dolist (c test-cases)
-		(insert ))
-	  (insert "hello, this is a test."))))
+	
+	(local-set-key (kbd "q") 'kill-buffer-and-window)
+	(local-set-key (kbd "c") 'go-ttest--buf-comment-case)
+	(local-set-key (kbd "u") 'go-ttest--buf-uncomment-case)
+	(local-set-key (kbd "d") 'go-ttest--buf-delete-case)
+	(local-set-key (kbd "m") 'go-ttest--buf-mark-case)
+
+	(local-set-key (kbd "n") 'next-line) ; down
+	(local-set-key (kbd "p") 'previous-line) ; up
+
+	(go-ttest--buf-refresh parse)))
 
 (provide 'ttest)
 ;;; ttest.el ends here
