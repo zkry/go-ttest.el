@@ -256,10 +256,67 @@ func TestXxx(t *testing.T) {
 	;; Case No. 0
 	(dolist (cn '(115 132 141 165 166 182 183))
 	  (goto-char cn)
-	  (should (equal (go-ttest--find-case)
-					 '(115 . on)))))
-  
-  
+	  (let ((parse (go-ttest--find-parse)))
+		(should (equal (go-ttest--find-case)
+					   '(115 . on)))))
+    (dolist (cn '(184 209 233 252 255 271 272 279))
+	  (goto-char cn)
+	  (let ((parse (go-ttest--find-parse)))
+		(should (equal (go-ttest--find-case)
+					   '(184  . off)))))
+	(dolist (cn '(280 282 308 361 378 382 383))
+	  (goto-char cn)
+	  (let ((parse (go-ttest--find-parse)))
+		(should (equal (go-ttest--find-case)
+					   '(280  . on))))))
+  (with-temp-buffer
+	(insert "package main
+
+func TestXxx(t *testing.T) {
+	testData := []struct {
+		cakeIngredientlisted map[string]struct{}
+		userCake             []kitchen.UserDessertChoice
+		expectedCake         []kitchen.UserDessertChoice
+		expectedSifter       report.FlourSifter
+	}{
+		//{nil, nil, nil, report.FlourSifterPassed},
+		{
+			map[string]struct{}{\"600,1\": {}},
+			[]kitchen.UserDessertChoice{{}},
+			nil,
+			report.FlourNotInChoiceIngredientlist,
+		},
+		{
+			map[string]struct{}{\"400,1\": {}},
+			[]kitchen.UserDessertChoice{{Choice: \"400,1\"}, {Choice: \"500,1\"}},
+			[]kitchen.UserDessertChoice{{Choice: \"400,1\"}},
+			report.FlourSifterPassed,
+		},
+	}
+	a := 1
+	b := 1
+}
+")
+	(dolist (cn '(259 261 305))
+	  (goto-char cn)
+	  (let ((parse (go-ttest--find-parse)))
+		(should (equal (go-ttest--find-case)
+					   '(259 . off)))))
+	(dolist (cn '(306 346 383 390 433 437))
+	  (goto-char cn)
+	  (let ((parse (go-ttest--find-parse)))
+		(should (equal (go-ttest--find-case)
+					   '(306 . on)))))
+	(dolist (cn '(438 441 444 548 600 630 634))
+	  (goto-char cn)
+	  (let ((parse (go-ttest--find-parse)))
+		(should (equal (go-ttest--find-case)
+					   '(438 . on)))))
+	(dolist (cn '(637))
+	  (goto-char cn)
+	  (let ((parse (go-ttest--find-parse)))
+		(should (equal (go-ttest--find-case)
+					   nil)))))
   ;; TODO support }, { 
   )
 ;; Bookmark: fix this test

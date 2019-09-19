@@ -92,38 +92,17 @@ Return nil if no block found."
 		table-begin))))
 
 (defun go-ttest--find-parse ()
-  "Return the parse of the table test thhe point is in."
+  "Return the parse of the table test thhe point is in, nil if no parse found."
   (save-excursion
-	(let ((table-start (go-ttest--find-table)))
-	  (unless table-start (error "Could not find a test table in current test"))
-	  (save-excursion (goto-char table-start) (go-ttest--parse-ttest)))))
+	(let ((table-start (go-ttest--find-table))
+		  (start-pos (point)))
+	  (if table-start
+		  (save-excursion (goto-char table-start) (go-ttest--parse-ttest start-pos))
+		nil))))
 
-(defun go-ttest--find-case ()
-  "Return (Pair location (or 'on 'off)) if the point is in a case definition, nil otherwise."
-  (save-excursion
-	(let ((at-point (point))
-		  (table-parse (go-ttest--find-parse)))
-	  (unless table-parse (error "Unable to extract the information in test table"))
-	  (and (go-ttest--table-at-idx table-parse)
-		   (nth (go-ttest--table-at-idx table-parse) (go-ttest--table-case-locs table-parse))))))
-
-(defun go-ttest--find-case ()
-  "Return (Pair location (or 'on 'off)) if the point is in a case definition, nil otherwise."
-  (save-excursion
-	(let ((at-point (point))
-		  (table-parse (go-ttest--find-parse)))
-	  (unless table-parse (error "Unable to extract the information in test table"))
-	  (if (or (> at-point (go-ttest--table-end-pos table-parse))
-			  (< at-point (go-ttest--table-start-pos table-parse))
-			  (and (> (length (go-ttest--table-case-locs table-parse)) 0)
-				   (< at-point (car (nth 0 (go-ttest--table-case-locs table-parse))))))
-		  nil ; out of the table bounds or before first case, can't be in a test case.
-		(let ((case-locs (cdr (go-ttest--table-case-locs table-parse)))
-			  (i 0))
-		  (forward-line 1)
-		  (while (and (< i (length case-locs)) (< (car (nth i case-locs)) (point)))
-			(setq i (1+ i)))
-		  (nth i (go-ttest--table-case-locs table-parse)))))))
+(defun go-ttest--find-case (parse)
+  "Return (Pair location (or 'on 'off)) of where point was found in PARSE."
+  (nth (go-ttest--table-at-idx parse) (go-ttest--table-case-locs parse)))
 
 ;; Description of algorithm:
 ;; - Look for a line of the pattern [Tt]est[[:alnum:]]* :?= []struct {
@@ -170,11 +149,11 @@ Return nil if no block found."
   
   indent-ct)
 
-(defun go-ttest--parse-ttest ()
-  "Return list of names of test with starting position if test are named, nil otherwise."
+(defun go-ttest--parse-ttest (&optional start-pos)
+  "Return a stucture containing pared test table.  Contain which case START-POS is at if given."
+  (unless start-pos (setq start-pos -1)) ;; Default value of pos should be number to make at-idx nil.
   (save-excursion
-	(let ((start-pos (point))
-		  (test-type (go-ttest--line-is-ttest-decl (thing-at-point 'line t)))
+	(let ((test-type (go-ttest--line-is-ttest-decl (thing-at-point 'line t)))
 		  (name-name nil)
 		  (case-types '())
 		  (base-indent-ct 0)
@@ -192,7 +171,7 @@ Return nil if no block found."
 			(let ((n (match-string 1 line))
 				  (tp (match-string 2 line)))
 			  (setq case-types (append case-types (list (cons n tp))))
-			  (when (and (string-match "[Nn]ame" n) (not name-name))
+			  (when (and (string-match "[Nn]ame" 1) (not name-name))
 				(setq name-name (cons n i)))
 			  (setq i (1+ i)))))
 		(forward-line))
@@ -219,9 +198,9 @@ Return nil if no block found."
 			  (when (and (> start-pos case-start-loc)
 						 (< start-pos (point))
 						 (not at-idx))
-				(setq at-idx (length case-locs)))))
+				(setq at-idx (- (length case-locs) 2)))))
 		  (forward-line))
-		(when (and (> start-pos case-start-loc) (< start-pos (point)) (not at-idx))
+		(when (and (> start-pos case-start-loc) (<= start-pos (point)) (not at-idx))
 		  (setq at-idx (1- (length case-locs)))))
 	  (make-go-ttest--table :type test-type
 							:name-field name-name
@@ -232,65 +211,171 @@ Return nil if no block found."
 							:end-pos (point)
 							:indent-ct base-indent-ct))))
 
-(defun go-ttest--case-on-p (loc)
-  "Return non-nil if test-case at position LOC is uncommented."
+;;; YASNIPPET GENERATORS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun go-ttest--make-case-snippet (parse)
+  "Return a yasnippet string of last test case found in PARSE."
+  ;; TODO we may want to have different kinds of snippets.
+  (cond
+   (t (go-ttest--make-blank-case-snippet parse))
+		  ;((equal (go-ttest--table-type parse) 'map) (go-ttest--table-make-map-snippet parse))
+		  ;((equal (go-ttest--table-type parse) 'slice) (go-ttest--table-make-slice-snippet parse))
+		  ;(t (error "Unknown table parse type"))
+   ))
+
+(defun go-ttest--make-blank-case-snippet (parse)
+  "Return a yasnippet string for the name-type pairs of the PARSE test table."
+  (let* ((type (go-ttest--table-type parse))
+		 (base-indent (apply #'concat (make-list (1+ (go-ttest--table-indent-ct parse)) "\t")))
+		 (inner-indent (apply #'concat (make-list (+ 2 (go-ttest--table-indent-ct parse)) "\t")))
+		 (fields (go-ttest--table-case-types parse))
+		 (field-idx 2)
+		 (ret base-indent))
+	(when (equal type 'map) (setq ret (concat ret "\"${1:Name}\": ")))
+	(setq ret (concat ret "{\n"))
+	(dolist (nt fields)
+	  (let ((name (car nt))
+			(type (cdr nt)))
+		(setq ret (concat ret (format "%s%s: ${%d:%s},\n" inner-indent name field-idx type)))
+		(setq field-idx (1+ field-idx))))
+	(setq ret (concat ret base-indent "},"))
+	ret))
+
+;;; ON/OFF FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun go-ttest--case-on-p (parse)
+  "Return non-nil if test-case at position LOC is uncommented given PARSE."
+  (let ((case (go-ttest--find-case parse)))
+	(and case (equal (cdr case) 'on))))
+
+(defun go-ttest--case-off-p (parse)
+  "Return non-nil if test-case at position LOC is uncommented given PARSE."
+  (let ((case (go-ttest--find-case parse)))
+	(and case (equal (cdr case) 'off))))
+
+(defun go-ttest--case-on (parse &optional loc)
+  "Uncomment test-case at position LOC and parse PARSE.
+
+If LOC is provided, turn on the case at position LOC.  Return
+non-nil if changed."
+  (go-ttest--apply-comment-func parse (if loc loc (car (go-ttest--find-case parse))) "//.*}"))
+
+(defun go-ttest--case-off (parse &optional loc)
+  "Comment test-case at position LOC and parse PARSE.
+
+If LOC is provided, turn of the case at LOC.  Retrun non-nil if changed."
+  (go-ttest--apply-comment-func parse (if loc loc (car (go-ttest--find-case parse))) "}"))
+
+;; TODO `comment-line' doesn't seem to comment the line 100% to gofmt standards.
+;;         It may be necessarry to write my own version of the function.
+(defun go-ttest--apply-comment-func (parse pos stop-regexp)
+  "Apply the `comment-line' func starting at POS.
+
+Apply the `comment-line' func to PARSE struct, stopping applying
+at STOP-REGEXP."
   (save-excursion
-	(goto-char loc)
-	(let ((case (go-ttest--find-case)))
-	  (unless case (error "Test case at loc not found"))
-	  (equal (cdr case) 'on))))
+	(goto-char pos)
+	;; Now we should be at the base of the case
+	(comment-line 1) (beginning-of-line)
+	(while (not (looking-at (concat (apply #'concat
+										   (make-list (1+ (go-ttest--table-indent-ct parse)) "\t"))
+									stop-regexp)))
+	  (comment-line 1) (beginning-of-line))
+	(comment-line 1)
+	t))
 
-(defun go-ttest--case-on (loc)
-  "Uncomment test-case at position LOC.  Return non-nil if changed."
-  (if (go-ttest--case-on-p loc)
-	  nil
-	(save-excursion
-	  (goto-char loc)
-	  (let ((pos (car (go-ttest--find-case)))
-			(parse (go-ttest--find-parse)))
-		(goto-char pos)
-		;; Now we should be at the base of the case
-		(comment-line 1) (beginning-of-line)
-		(while (not (looking-at (concat (apply #'concat (make-list (1+ (go-ttest--table-indent-ct parse)) "\t"))
-										"//.*}")))
-		  (comment-line 1) (beginning-of-line))
-		(comment-line 1)))))
+(defun go-ttest--apply-comment-func-all (parse do-symbol do-func)
+  "Apply a function to all cases of PARSE, matching DO-SYMBOL.
 
-(defun go-ttest--case-off (loc)
-  "Uncomment test-case at position LOC.  Return non-nil if changed."
-  (if (not (go-ttest--case-on-p loc))
-	  nil
-	(save-excursion
-	  (goto-char loc)
-	  (let ((pos (car (go-ttest--find-case)))
-			(parse (go-ttest--find-parse)))
-		(goto-char pos)
-		;; Now we should be at the base of the case
-		(comment-line 1) (beginning-of-line)
-		(while (not (looking-at (concat (apply #'concat (make-list (1+ (go-ttest--table-indent-ct parse)) "\t"))
-										"}")))
-		  (comment-line 1) (beginning-of-line))
-		(comment-line 1)))))
+DO-FUNC is then ran on applicable lines."
+  (let ((changes 0))
+	(let ((change-ct (dolist (c (reverse (go-ttest--table-case-locs parse)) changes)
+					   (let ((pos (car c))
+							 (do (equal do-symbol (cdr c))))
+						 (if do
+							 (progn
+							   (apply do-func (list parse pos))
+							   (setq changes (1+ changes)))
+						   nil)))))
+	  (message (format "%d test cases turned %s." change-ct do-symbol)))))
+
+;;; INTERACTIVE FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defun go-ttest-toggle ()
   "Toggle the comments of the test case that the pointer is on."
-  (interactive))
+  (interactive)
+  (let ((parse (go-ttest--find-parse)))
+	(unless parse (error "No test case found at point"))
+	(if (go-ttest--case-on-p parse)
+		(go-ttest--case-off parse)
+	  (go-ttest--case-on parse))))
 
 (defun go-ttest-off ()
   "Toggle the comments of the test case that the pointer is on."
-  (interactive))
+  (interactive)
+  (let* ((parse (go-ttest--find-parse))
+		 (case (and parse (go-ttest--find-case parse))))
+	(unless parse (error "No test case found at point"))
+    (if (equal (cdr case) 'off)
+		(message "Test case is already active.")
+	  (let ((changed (go-ttest--case-off parse)))
+		(when (not changed) (message "Test case is already active."))))))
 
 (defun go-ttest-off-all ()
   "Toggle the comments of the test case that the pointer is on."
-  (interactive))
+  (interactive)
+  (let ((parse (go-ttest--find-parse)))
+	(go-ttest--apply-comment-func-all parse 'on #'go-ttest--case-off)))
 
 (defun go-ttest-on ()
   "Toggle the comments of the test case that the pointer is on."
-  (interactive))
+  (interactive)
+  (let* ((parse (go-ttest--find-parse))
+		 (case (and parse (go-ttest--find-case parse))))
+	(unless parse (error "No test case found at point"))
+    (if (equal (cdr case) 'on)
+		(message "Test case is already active.")
+	  (let ((changed (go-ttest--case-on parse)))
+		(when (not changed) (message "Test case is already active."))))))
 
 (defun go-ttest-on-all ()
   "Toggle the comments of the test case that the pointer is on."
-  (interactive))
+  (interactive)
+  (let ((parse (go-ttest--find-parse)))
+	(go-ttest--apply-comment-func-all parse 'off #'go-ttest--case-on)))
+
+(defun go-ttest-add-test ()
+  "Add a new test to the nearest test table."
+  (interactive)
+  ;; TODO Should optionally check for alternative test file.
+  (let* ((parse (go-ttest--find-parse))
+		 (template (go-ttest--make-case-snippet parse)))
+	(goto-char (go-ttest--table-end-pos parse))
+	(insert "\n")
+	(forward-line -1)
+	(yas-expand-snippet template)))
+
+;; NOTES:
+;; buffer-live-p: Test to see whether a buffer is live or not. The buffer is stored in a defvar.
+;; with-current-buffer: Performs the functions in the body on the buffer.
+;; (read-only-mode): Starter mode to view message.
+;; (let ((inhibit-read-only t)) (erase-buffer) (local-set-key (kbd "q") 'kill-buffer-and-window) (insert ...))
+;; [[file:~/dev/mu/mu4e/mu4e-headers.el::(if%20(eq%20mu4e-split-view%20'single-window)][Creating a new header]]
+(defun go-ttest ()
+  "Open a buffer to interactivley modify all of the table test cases."
+  (interactive)
+  (let* ((parse (go-ttest--find-parse))
+		 (test-cases (go-ttest--table-case-locs parse))
+		 (viewwin (split-window-vertically (- (1+ (length test-cases))))))
+	(select-window viewwin)
+	(switch-to-buffer (get-buffer-create "*go-table-test-cases*"))
+	(read-only-mode)
+	(let ((inhibit-read-only t))
+	  (erase-buffer)
+	  (local-set-key (kbd "q") 'kill-buffer-and-window)
+	  (dolist (c test-cases)
+		(insert ))
+	  (insert "hello, this is a test."))))
 
 (provide 'ttest)
 ;;; ttest.el ends here
