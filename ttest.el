@@ -97,13 +97,38 @@ Return nil if no block found."
 	(let ((table-start (go-ttest--find-table))
 		  (start-pos (point)))
 	  (if table-start
-		  (save-excursion (goto-char table-start) (go-ttest--parse-ttest start-pos))
+		  (let ((parse (save-excursion (goto-char table-start) (go-ttest--parse-ttest start-pos))))
+			(go-ttest--normalize-table parse)
+			;; Run the parse code twice, one to find the end point, then normalize.
+			;; Parsing the second time should result in correct parse.
+			(save-excursion (goto-char table-start) (go-ttest--parse-ttest start-pos)))
 		nil))))
 
 (defun go-ttest--find-case (parse)
   "Return (Pair location (or 'on 'off)) of where point was found in PARSE."
-  (unless (go-ttest--table-at-idx parse) (error "No test case found under point."))
+  (unless (go-ttest--table-at-idx parse) (error "No test case found under point"))
   (nth (go-ttest--table-at-idx parse) (go-ttest--table-case-locs parse)))
+
+(defun go-ttest--normalize-table (parse)
+  "Modifies the table of PARSE in a way to make it easier to parse.
+
+The new parse is returned.  If the first round of parsing missed
+data, normalizing then re-parsing will obtain the data for all of
+the test cases."
+  (save-excursion
+	;; start from end as starting from the beginning will mess with parse indexes.
+	(goto-char (go-ttest--table-end-pos parse))
+	(let* ((begin-pos (go-ttest--table-begin-pos parse))
+		   (base-indent-ct (go-ttest--table-indent-ct parse))
+		   (search-regex (concat (make-string (1+ base-indent-ct) ?\t)
+								 "}, \\(?:\".*\": \\){")))
+	  (while (> (point) begin-pos)
+		(when (looking-at search-regex)
+		  (search-forward "}, ")
+		  (insert "\n")
+		  (indent-according-to-mode))
+		(forward-line -1)))
+	(goto-char (go-ttest--table-begin-pos parse))))
 
 ;; Description of algorithm:
 ;; - Look for a line of the pattern [Tt]est[[:alnum:]]* :?= []struct {
@@ -150,7 +175,8 @@ Return nil if no block found."
   ;; A list of (stringp:name string:type) pairs of the test cases.
   case-types
 
-  start-pos
+  start-pos ; position of user point
+  begin-pos ; position of start of table
   end-pos
   
   indent-ct)
@@ -160,6 +186,7 @@ Return nil if no block found."
   (unless start-pos (setq start-pos -1)) ;; Default value of pos should be number to make at-idx nil.
   (save-excursion
 	(let ((test-type (go-ttest--line-is-ttest-decl (thing-at-point 'line t)))
+		  (begin-pos (point))
 		  (name-name nil)
 		  (names '())
 		  (case-types '())
@@ -233,6 +260,7 @@ Return nil if no block found."
 							:at-idx at-idx
 							:case-types case-types
 							:start-pos start-pos
+							:begin-pos begin-pos
 							:end-pos (point)
 							:indent-ct base-indent-ct))))
 
@@ -313,7 +341,8 @@ at STOP-REGEXP."
 	(goto-char pos)
 	;; Now we should be at the base of the case
 	(apply func (list 1)) (beginning-of-line)
-	(while (not (looking-at (concat (apply #'concat
+	(while (not (looking-at (concat "^"
+									(apply #'concat
 										   (make-list (1+ (go-ttest--table-indent-ct parse)) "\t"))
 									stop-regexp)))
 	  (apply func (list 1))
@@ -439,15 +468,37 @@ State is then used to perform bulk operations.")
   (interactive)
   (go-ttest--buf-case-action 'on))
 
+(defun go-ttest--buf-uncomment-all-case ()
+  "In go-ttest special buffer, comment test case of test at point."
+  (interactive)
+  (go-ttest--buf-case-action-all 'on))
+
+(defun go-ttest--buf-comment-all-case ()
+  "In go-ttest special buffer, comment test case of test at point."
+  (interactive)
+  (go-ttest--buf-case-action-all 'off))
+
 (defun go-ttest--buf-delete-case ()
   "In go-ttest special buffer, comment test case of test at point."
   (interactive)
   (go-ttest--buf-case-action 'delete))
 
+(defun go-ttest--buf-delete-all-case ()
+  "In go-ttest special buffer, comment test case of test at point."
+  (interactive)
+  (if (yes-or-no-p "Delete all test cases? ")
+	  (go-ttest--buf-case-action-all 'delete)
+	nil))
+
+(defun go-ttest--buf-only-case ()
+  "In go-ttest special buffer, make only case under point active."
+  (interactive)
+  (go-ttest--buf-case-action-all 'off)
+  (go-ttest--buf-case-action 'on))
+
 (defun go-ttest--buf-case-action (action)
   "In go-ttest special buffer, uncomment testcase at point if ACTION is 'on.
-If ACTION IS 'off comment out the case, if ACTION is
-'delete, delete the test."
+If ACTION IS 'off comment out the case, if ACTION is 'delete, delete the test."
   (let* ((parse (car go-ttest--state))
 		 (case (go-ttest--buf-case-at-line parse))
 		 (buffer (go-ttest--table-buffer parse))
@@ -459,9 +510,28 @@ If ACTION IS 'off comment out the case, if ACTION is
 		(beep)
 	  (with-current-buffer buffer
 		(apply action-func (list parse (car case)))
-		(goto-char (go-ttest--table-start-pos parse))
+		(goto-char (go-ttest--table-begin-pos parse))
 		(setq parse (go-ttest--find-parse)))
 	  (go-ttest--buf-refresh parse))))
+
+(defun go-ttest--buf-case-action-all (action)
+  "In go-ttest special buffer, uncomment testcase at point if ACTION is 'on.
+If ACTION IS 'off comment out the case, if ACTION is
+'delete, delete the test."
+  (let* ((parse (car go-ttest--state))
+		 (cases (reverse (go-ttest--table-case-locs parse)))
+		 (buffer (go-ttest--table-buffer parse))
+		 (action-func (cond ((equal action 'on) #'go-ttest--case-on)
+							((equal action 'off) #'go-ttest--case-off)
+							((equal action 'delete) #'go-ttest--case-delete))))
+	(dolist (case cases)
+	  (if (equal (cdr case) action)
+		  nil
+		(with-current-buffer buffer
+		  (apply action-func (list parse (car case)))
+		  (goto-char (go-ttest--table-begin-pos parse))
+		  (setq parse (go-ttest--find-parse)))
+		(go-ttest--buf-refresh parse)))))
 
 (defun go-ttest ()
   "Open a buffer to interactivley modify all of the table test cases."
@@ -469,7 +539,7 @@ If ACTION IS 'off comment out the case, if ACTION is
   (let* ((parse (go-ttest--find-parse))
 		 (test-states (mapcar #'cdr (go-ttest--table-case-locs parse)))
 		 (test-names (go-ttest--table-names parse))
-		 (buffer (get-buffer-create "*go-table-test-cases*"))
+		 (buffer (get-buffer-create "*go-table-test-cases*"))n
 		 (viewwin (or (get-buffer-window buffer)
 					  (split-window-vertically (min -4 (- (1+ (length test-states))))))))
 	(select-window viewwin)
@@ -478,11 +548,20 @@ If ACTION IS 'off comment out the case, if ACTION is
 	(read-only-mode)
 	
 	(local-set-key (kbd "q") 'kill-buffer-and-window)
-	(local-set-key (kbd "c") 'go-ttest--buf-comment-case)
-	(local-set-key (kbd "u") 'go-ttest--buf-uncomment-case)
-	(local-set-key (kbd "d") 'go-ttest--buf-delete-case)
-	(local-set-key (kbd "m") 'go-ttest--buf-mark-case)
 
+	(local-set-key (kbd "c") 'go-ttest--buf-comment-case)
+	(local-set-key (kbd "C") 'go-ttest--buf-comment-all-case)
+	(local-set-key (kbd "/") 'go-ttest--buf-comment-case)
+	(local-set-key (kbd "u") 'go-ttest--buf-uncomment-case)
+	(local-set-key (kbd "U") 'go-ttest--buf-uncomment-case)
+	(local-set-key (kbd "o") 'go-ttest--buf-only-case)
+
+	(local-set-key (kbd "d") 'go-ttest--buf-delete-case)
+	(local-set-key (kbd "D") 'go-ttest--buf-delete-all-case)
+
+	;(local-set-key (kbd "m") 'go-ttest--buf-mark-case)
+	
+	
 	(local-set-key (kbd "n") 'next-line) ; down
 	(local-set-key (kbd "p") 'previous-line) ; up
 
