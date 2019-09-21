@@ -39,6 +39,10 @@
 
 ;;; Code:
 
+(defvar go-ttest-struct-regexp
+  (list "[Tt]est[[:alnum:]]*"))
+
+
 (defun go-ttest--block-beginning ()
   "Find the beginning point of the current block the point is in.
 Return nil if no block found."
@@ -130,17 +134,15 @@ the test cases."
 		(forward-line -1)))
 	(goto-char (go-ttest--table-begin-pos parse))))
 
-;; Description of algorithm:
-;; - Look for a line of the pattern [Tt]est[[:alnum:]]* :?= []struct {
-;;     in the current block.
-
-;; * TODO Add more valid name cases to this.
 (defun go-ttest--line-is-ttest-decl (line)
   "Return non-nil if LINE is the beginning of a table test declairation."
-  (cond
-   ((string-match "[Tt]est[[:alnum:]]* :?= \\[\\]struct {" line) 'slice)
-   ((string-match "[Tt]est[[:alnum:]]* :?= map\\[\\(string\\|int\\)\\]struct {" line) 'map)
-   (t nil)))
+  (let ((found nil))
+	(dolist (sr go-ttest-struct-regexp found)
+	  (cond
+	   ((string-match (concat sr " :?= \\[\\]struct {") line)
+		(setq found 'slice))
+	   ((string-match (concat sr " :?= map\\[\\(string\\|int\\)\\]struct {") line)
+		(setq found 'map))))))
 
 (defconst go-ttest--struct-type-regexp
   "^[^/[:alnum:]]*\\([[:alnum:]]+\\) +\\([[:graph:]].*\\)$")
@@ -268,7 +270,6 @@ the test cases."
 
 (defun go-ttest--make-case-snippet (parse)
   "Return a yasnippet string of last test case found in PARSE."
-  ;; TODO we may want to have different kinds of snippets.
   (cond
    (t (go-ttest--make-blank-case-snippet parse))
 		  ;((equal (go-ttest--table-type parse) 'map) (go-ttest--table-make-map-snippet parse))
@@ -311,7 +312,7 @@ the test cases."
 
 If LOC is provided, turn on the case at position LOC.  Return
 non-nil if changed."
-  (go-ttest--apply-comment-func parse (if loc loc (car (go-ttest--find-case parse))) "//.*}"))
+  (go-ttest--apply-comment-func parse (if loc loc (car (go-ttest--find-case parse))) "// *}"))
 
 (defun go-ttest--case-off (parse &optional loc)
   "Comment test-case at position LOC and parse PARSE.
@@ -326,11 +327,9 @@ If LOC is provided, turn on the case at position LOC.  Return
 non-nil if changed."
   (go-ttest--apply-comment-func parse
 								(if loc loc (car (go-ttest--find-case parse)))
-								"\\(//\\)? *}" ;; TODO structs in test-case cause problems
+								"\\(//\\)? *}"
 								#'kill-whole-line))
 
-;; TODO `comment-line' doesn't seem to comment the line 100% to gofmt standards.
-;;         It may be necessarry to write my own version of the function.
 (defun go-ttest--apply-comment-func (parse pos stop-regexp &optional func)
   "Apply the `comment-line' func starting at POS.
 
@@ -341,14 +340,20 @@ at STOP-REGEXP."
 	(goto-char pos)
 	;; Now we should be at the base of the case
 	(apply func (list 1)) (beginning-of-line)
-	(while (not (looking-at (concat "^"
-									(apply #'concat
-										   (make-list (1+ (go-ttest--table-indent-ct parse)) "\t"))
-									stop-regexp)))
+	(let ((br-ct 0)
+		  (end-regexp (concat "^" (apply #'concat
+										 (make-list (1+ (go-ttest--table-indent-ct parse)) "\t"))
+							  stop-regexp)))
+	  (while (or (not (looking-at end-regexp)) (not (equal br-ct 0)))
+		;; Since commented lines lose indentation we need to count braces.
+		(when (string-match "//.*{$" (thing-at-point 'line t))
+		  (setq br-ct (1+ br-ct)))
+		(when (string-match "//[^{]*},$" (thing-at-point 'line t))
+		  (setq br-ct (1- br-ct)))
+		(apply func (list 1))
+		(beginning-of-line))
 	  (apply func (list 1))
-	  (beginning-of-line))
-	(apply func (list 1))
-	t))
+	  t)))
 
 (defun go-ttest--apply-comment-func-all (parse do-symbol do-func)
   "Apply a function to all cases of PARSE, matching DO-SYMBOL.
@@ -364,6 +369,53 @@ DO-FUNC is then ran on applicable lines."
 							   (setq changes (1+ changes)))
 						   nil)))))
 	  (message (format "%d test cases turned %s." change-ct do-symbol)))))
+
+(defun go-ttest--add-field (parse name type default)
+  "Add a new field (NAME and TYPE) to the table test structure at of PARSE."
+  (when (member name (mapcar #'car (go-ttest--table-case-types parse)))
+	(error (format "Field `%s' already exists in struct" name)))
+  (goto-char (go-ttest--table-begin-pos parse))
+  (let* ((template-idx 1)
+		 (template-format-str "${%d:%s},")
+		 (base-indent-ct (go-ttest--table-indent-ct parse))
+		 (case-indent-ct (1+ base-indent-ct))
+		 (case-end-regexp (concat (make-string case-indent-ct ?\t) "}"))
+		 (test-end-regexp (concat (make-string base-indent-ct ?\t) "}"))
+		 (case-indent (make-string (1+ case-indent-ct) ?\t))
+		 (case-defn-str (concat (make-string case-indent-ct ?\t) name " " type))
+		 (default-case-str (concat case-indent name ": " template-format-str)))
+	(while (not (looking-at test-end-regexp)) (forward-line))
+	(insert "\n")
+	(forward-line -1)
+	(insert case-defn-str)
+	(forward-line 2)
+	(while (not (looking-at test-end-regexp))
+	  (when (looking-at case-end-regexp)
+		(insert "\n")
+		(forward-line -1)
+		(insert (format default-case-str template-idx default))
+		(setq template-idx (1+ template-idx))
+		(forward-line))
+	  (forward-line)))
+  (goto-char (go-ttest--table-begin-pos parse))
+  (setq parse (go-ttest--find-parse))
+  (kill-region (point) (go-ttest--table-end-pos parse))
+  (let ((snippet (current-kill 0)))
+	(yas-expand-snippet snippet)))
+
+(defun go-ttest--kill-line (indent-ct)
+  "Kill line like function `kill-whole-line', kill between { and } if necessary.
+
+INDENT-CT should be provided to let functino know at which indentation the block
+should end."
+  (let ((block-indent (make-string indent-ct ?\t))
+		(ending-is-block (string-match "{$" (thing-at-point 'line t))))
+	(kill-whole-line)
+	(when ending-is-block
+	  (let ((end-regexp (concat block-indent "}")))
+		(while (not (looking-at end-regexp))
+		  (kill-whole-line)))
+	  (kill-whole-line))))
 
 ;;; INTERACTIVE FUNCTIONS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -422,17 +474,24 @@ DO-FUNC is then ran on applicable lines."
 	(yas-expand-snippet template)))
 
 (defun go-ttest-add-field ()
-  "TODO."
-  (interactive))
+  "Insert a new field for the table test with a given default."
+  (interactive)
+  (let* ((parse (go-ttest--find-parse))
+		 (field-name (and parse (read-string "Enter the name of the field: ")))
+		 (field-type (and parse (read-string "Enter the type of the field: ")))
+		 (default (and parse (read-string "Enter the default value of the field: "))))
+	(unless parse (error "No test case found"))
+	(go-ttest--add-field parse field-name field-type default)))
 
-(defun go-ttest-remove-field ()
-  "TODO."
-  (interactive))
 
 ;;; go-ttest interactive command ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defvar go-ttest--state '()
   "Stores the state of the buffer when running the go-ttest.
+State is then used to perform bulk operations.")
+
+(defvar go-ttest--parent-window '()
+  "Stores the window from which go-ttest was called.
 State is then used to perform bulk operations.")
 
 (defun go-ttest--buf-refresh (parse)
@@ -442,6 +501,7 @@ State is then used to perform bulk operations.")
 		(inhibit-read-only t)
 		(current-line (line-number-at-pos)))
 	(erase-buffer)
+	
 	(setq-local go-ttest--state (cons parse '(make-list (length test-names) nil)))
 	(dotimes (i (length test-states))
 	  (let ((name (nth i test-names))
@@ -489,6 +549,19 @@ State is then used to perform bulk operations.")
   (if (yes-or-no-p "Delete all test cases? ")
 	  (go-ttest--buf-case-action-all 'delete)
 	nil))
+
+(defun go-ttest--buf-add-case ()
+  "In go-ttest special buffer, comment test case of test at point."
+  (interactive)
+  (let ((parse (car go-ttest--state))
+		(mini-buf (current-buffer))
+		(parent-window go-ttest--parent-window))
+    (kill-buffer-and-window)
+	(select-window parent-window)
+	(set-buffer (go-ttest--table-buffer parse))
+	(goto-char (go-ttest--table-begin-pos parse))
+	(call-interactively #'go-ttest-add-test)
+	(kill-buffer mini-buf)))
 
 (defun go-ttest--buf-only-case ()
   "In go-ttest special buffer, make only case under point active."
@@ -541,31 +614,42 @@ If ACTION IS 'off comment out the case, if ACTION is
 		 (test-names (go-ttest--table-names parse))
 		 (buffer (get-buffer-create "*go-table-test-cases*"))n
 		 (viewwin (or (get-buffer-window buffer)
-					  (split-window-vertically (min -4 (- (1+ (length test-states))))))))
+					  (split-window-vertically (min -4 (- (1+ (length test-states)))))))
+		 (parent-win (selected-window)))
+	
 	(select-window viewwin)
 	(switch-to-buffer buffer)
-
+	
+	(setq-local go-ttest--parent-window parent-win)
 	(read-only-mode)
 	
 	(local-set-key (kbd "q") 'kill-buffer-and-window)
-
+    
+	(local-set-key (kbd "a") 'go-ttest--buf-add-case)
 	(local-set-key (kbd "c") 'go-ttest--buf-comment-case)
 	(local-set-key (kbd "C") 'go-ttest--buf-comment-all-case)
 	(local-set-key (kbd "/") 'go-ttest--buf-comment-case)
 	(local-set-key (kbd "u") 'go-ttest--buf-uncomment-case)
-	(local-set-key (kbd "U") 'go-ttest--buf-uncomment-case)
+	(local-set-key (kbd "U") 'go-ttest--buf-uncomment-all-case)
 	(local-set-key (kbd "o") 'go-ttest--buf-only-case)
 
 	(local-set-key (kbd "d") 'go-ttest--buf-delete-case)
 	(local-set-key (kbd "D") 'go-ttest--buf-delete-all-case)
 
 	;(local-set-key (kbd "m") 'go-ttest--buf-mark-case)
-	
-	
+    
 	(local-set-key (kbd "n") 'next-line) ; down
 	(local-set-key (kbd "p") 'previous-line) ; up
-
 	(go-ttest--buf-refresh parse)))
+
+(defun go-ttest-add-default-bindings ()
+  "Add default key bindings for main go-ttest commands."
+  (add-hook 'go-mode-hook
+			(lambda ()
+			  (progn
+				(local-set-key (kbd "C-c C-t") #'go-ttest)
+				(local-set-key (kbd "C-c C-t a") #'go-ttest-add-test)
+				(local-set-key (kbd "C-c C-t f") #'go-ttest-add-field)))))
 
 (provide 'ttest)
 ;;; ttest.el ends here
