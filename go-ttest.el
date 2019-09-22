@@ -3,7 +3,7 @@
 ;; Author: Zachary Ryan Romero
 ;; Maintainer: Zachary Ryan Romero
 ;; Version: 0.1.0
-;; Package-Requires: ()
+;; Package-Requires: ((yasnippet "0.13.0"))
 ;; Homepage: github.com/zkry/go-ttest
 ;; Keywords: go testing
 
@@ -37,11 +37,21 @@
 ;; go-ttest seeks to solve this problem by providing a set of clean
 ;; commands for interacting with table tests.
 
+;;; About the Code:
+
+;; The code uses a wide variety of regular expressions to extract and
+;; find the various parts of test cases.  The major work of the
+;; package is done vie the `go-ttest--parse' function.  This extracts
+;; all of the data related to a table tests and allows easly
+;; implementation of the various operations to be done.
+
 ;;; Code:
 
-(defvar go-ttest-struct-regexp
-  (list "[Tt]est[[:alnum:]]*"))
+(require 'yasnippet)
+(require 'seq)
 
+(defvar go-ttest-struct-regexp
+  (list "[Tt]est[[:alnum:]]*" "[Tt]able[[:alnum:]]*"))
 
 (defun go-ttest--block-beginning ()
   "Find the beginning point of the current block the point is in.
@@ -49,7 +59,7 @@ Return nil if no block found."
   (let ((ret-pt nil))
 	(save-excursion
 	  (beginning-of-line)
-	  (while (and (not (looking-at "func Test"))
+	  (while (and (not (looking-at "func \\(?:([[:graph:]]+ [[:graph:]]+) \\)?Test"))
 				  (not (equal (point-min) (point))))
 		(forward-line -1)
 		(setq ret-pt (point)))
@@ -101,11 +111,11 @@ Return nil if no block found."
 	(let ((table-start (go-ttest--find-table))
 		  (start-pos (point)))
 	  (if table-start
-		  (let ((parse (save-excursion (goto-char table-start) (go-ttest--parse-ttest start-pos))))
+		  (let ((parse (save-excursion (goto-char table-start) (go-ttest--parse start-pos))))
 			(go-ttest--normalize-table parse)
 			;; Run the parse code twice, one to find the end point, then normalize.
 			;; Parsing the second time should result in correct parse.
-			(save-excursion (goto-char table-start) (go-ttest--parse-ttest start-pos)))
+			(save-excursion (goto-char table-start) (go-ttest--parse start-pos)))
 		nil))))
 
 (defun go-ttest--find-case (parse)
@@ -179,11 +189,12 @@ the test cases."
 
   start-pos ; position of user point
   begin-pos ; position of start of table
-  end-pos
+  end-pos   ; position of end of table
   
-  indent-ct)
+  indent-ct ; the number of tabs the test case definition starts with.
+  )
 
-(defun go-ttest--parse-ttest (&optional start-pos)
+(defun go-ttest--parse (&optional start-pos)
   "Return a stucture containing pared test table.  Contain which case START-POS is at if given."
   (unless start-pos (setq start-pos -1)) ;; Default value of pos should be number to make at-idx nil.
   (save-excursion
@@ -243,7 +254,8 @@ the test cases."
 		  (when (and (equal test-type 'slice)
 					 (equal field-ct 0)
 					 (string-match "\t*\"\\(.*\\)\"," (thing-at-point 'line t)))
-			(setq found-name (match-string 1 (thing-at-point 'line t))))
+			(setq found-name (concat (number-to-string (1+ (length (seq-filter #'identity names)))) ". "
+									 (match-string 1 (thing-at-point 'line t)))))
 		  (when (string-match ",$" (thing-at-point 'line t))
 			(setq field-ct (1+ field-ct)))
 		  (when (looking-at entry-begin-str)
@@ -260,15 +272,16 @@ the test cases."
 						 (not at-idx))
 				(setq at-idx (- (length case-locs) 2)))
 			  ;; Manage test name list (maps find name before loc is added, slices after)
-			  (setq names (append names (list found-name)))))
+			  (setq names (append names (list found-name)))
+			  (setq found-name nil)))
 		  (forward-line))
-		(when (equal test-type 'slice) (setq names (append names (list found-name))))
+		(when (and (equal test-type 'slice) found-name) (setq names (append names (list found-name))))
 		(when (and (> start-pos case-start-loc) (<= start-pos (point)) (not at-idx))
 		  (setq at-idx (1- (length case-locs)))))
 	  (make-go-ttest--table :buffer (current-buffer)
 							:type test-type
 							:name-field name-name
-							:names (if (equal test-type 'slice) (cdr names) names)
+							:names (seq-filter #'identity names)
 							:case-locs case-locs
 							:at-idx at-idx
 							:case-types case-types
@@ -282,11 +295,7 @@ the test cases."
 (defun go-ttest--make-case-snippet (parse)
   "Return a yasnippet string of last test case found in PARSE."
   (cond
-   (t (go-ttest--make-blank-case-snippet parse))
-		  ;((equal (go-ttest--table-type parse) 'map) (go-ttest--table-make-map-snippet parse))
-		  ;((equal (go-ttest--table-type parse) 'slice) (go-ttest--table-make-slice-snippet parse))
-		  ;(t (error "Unknown table parse type"))
-   ))
+   (t (go-ttest--make-blank-case-snippet parse))))
 
 (defun go-ttest--make-blank-case-snippet (parse)
   "Return a yasnippet string for the name-type pairs of the PARSE test table."
@@ -365,9 +374,6 @@ at STOP-REGEXP."
 	  ;; Now we should be at the base of the case
 	  (apply func func-args) (beginning-of-line)
 	  (let ((br-ct 0)
-			(end-regexp (concat "^" (apply #'concat
-										   (make-list (1+ (go-ttest--table-indent-ct parse)) "\t"))
-								stop-regexp))
 			(start-of-next-regexp (concat "^"
 										  (make-string (1+ (go-ttest--table-indent-ct parse)) ?\t)
 										  "\\(//\\)?{"))
@@ -383,7 +389,6 @@ at STOP-REGEXP."
 			(setq br-ct (1- br-ct)))
 		  (apply func func-args)
 		  (beginning-of-line))
-		
 		t))))
 
 (defun go-ttest--apply-comment-func-all (parse do-symbol do-func)
@@ -405,15 +410,22 @@ DO-FUNC is then ran on applicable lines."
   "[a-zA-Z][a-zA-Z0-9_]*"
   "Regex to determin valid variable/type names.")
 
+;;; FIELD ADD CODE ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 (defun go-ttest--valid-symbol-p (name)
   "Determine if a NAME is a valid Go type/var name."
   (string-match go-ttest--go-symbol-regex name))
 
 (defun go-ttest--backup-add-field (default-case-str default idx)
+  "Move point backwards until find end of test-case, then add new field.
+
+DEFAULT-CASE-STR is the `\t+NAME: YAS-TMPL' template string.
+DEFAULT is the default value of added field, and IDX is the index
+of the case that the field is being added to."
   (while (not (looking-at "},"))
 	(forward-char -1))
   (let ((is-comment (string-match "//.*}" (thing-at-point 'line t))))
-	(insert "," (format default-case-str (if is-comment "//\t" "") template-idx default)))
+	(insert "," (format default-case-str (if is-comment "//\t" "") idx default)))
   (forward-line))
 
 (defun go-ttest--add-field (parse name type default)
@@ -463,6 +475,8 @@ DO-FUNC is then ran on applicable lines."
   (let ((snippet (current-kill 0)))
 	(yas-expand-snippet snippet)))
 
+;; Note: The remove field function is currently not implemented, this
+;; is an implementation of kill-line for such a function.
 (defun go-ttest--kill-line (indent-ct)
   "Kill line like function `kill-whole-line', kill between { and } if necessary.
 
@@ -574,7 +588,7 @@ State is then used to perform bulk operations.")
 			(state (nth i test-states)))
 		(insert (format "   %2s %-50s"
 						(if (equal state 'off) "//" "")
-						(if name name (format "Unnamed Test %d" i))))
+						(if name name (format "Unnamed Test %d" (1+ i)))))
 		(when (< i (1- (length test-states))) (insert "\n"))))
 	(goto-char (point-min))
 	(forward-line (1- current-line))))
@@ -677,8 +691,7 @@ If ACTION IS 'off comment out the case, if ACTION is
   (interactive)
   (let* ((parse (go-ttest--find-parse))
 		 (test-states (mapcar #'cdr (go-ttest--table-case-locs parse)))
-		 (test-names (go-ttest--table-names parse))
-		 (buffer (get-buffer-create "*go-table-test-cases*"))n
+		 (buffer (get-buffer-create "*go-table-test-cases*"))
 		 (viewwin (or (get-buffer-window buffer)
 					  (split-window-vertically (min -4 (- (1+ (length test-states)))))))
 		 (parent-win (selected-window)))
@@ -708,7 +721,7 @@ If ACTION IS 'off comment out the case, if ACTION is
 	(local-set-key (kbd "p") 'previous-line) ; up
 	(go-ttest--buf-refresh parse)))
 
-(defun go-ttest-add-default-bindings ()
+(defun go-ttest-default-bindings ()
   "Add default key bindings for main go-ttest commands."
   (add-hook 'go-mode-hook
 			(lambda ()
@@ -717,5 +730,5 @@ If ACTION IS 'off comment out the case, if ACTION is
 				(local-set-key (kbd "C-c C-t a") #'go-ttest-add-test)
 				(local-set-key (kbd "C-c C-t f") #'go-ttest-add-field)))))
 
-(provide 'ttest)
-;;; ttest.el ends here
+(provide 'go-ttest)
+;;; go-ttest.el ends here
