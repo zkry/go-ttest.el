@@ -226,7 +226,8 @@ the test cases."
 									(concat "^" (apply #'concat (make-list (1+ base-indent-ct) "\t"))
 											"\\(?://\\)?\\(?:}, \\)?\"\\(.*\\)\": {"))))
 			(found-name nil)
-			(field-ct 0))
+			(field-ct 0) ; not currently used but may be useful in future.
+			)
 		;; We're at the beginning of all of the test cases; repeat until all cases have been iterated over.
 		(while (not (looking-at ending-str))
 		  ;; Check if we're looking at the name field
@@ -366,8 +367,15 @@ at STOP-REGEXP."
 	  (let ((br-ct 0)
 			(end-regexp (concat "^" (apply #'concat
 										   (make-list (1+ (go-ttest--table-indent-ct parse)) "\t"))
-								stop-regexp)))
-		(while (or (not (looking-at end-regexp)) (not (equal br-ct 0)))
+								stop-regexp))
+			(start-of-next-regexp (concat "^"
+										  (make-string (1+ (go-ttest--table-indent-ct parse)) ?\t)
+										  "\\(//\\)?{"))
+			(test-end-regexp (concat "^"
+									 (make-string (go-ttest--table-indent-ct parse) ?\t)
+									 "}")))
+		(while (and (not (looking-at start-of-next-regexp))
+					(not (looking-at test-end-regexp)))
 		  ;; Since commented lines lose indentation we need to count braces.
 		  (when (string-match "//.*{$" (thing-at-point 'line t))
 			(setq br-ct (1+ br-ct)))
@@ -375,7 +383,7 @@ at STOP-REGEXP."
 			(setq br-ct (1- br-ct)))
 		  (apply func func-args)
 		  (beginning-of-line))
-		(apply func func-args)
+		
 		t))))
 
 (defun go-ttest--apply-comment-func-all (parse do-symbol do-func)
@@ -401,16 +409,26 @@ DO-FUNC is then ran on applicable lines."
   "Determine if a NAME is a valid Go type/var name."
   (string-match go-ttest--go-symbol-regex name))
 
+(defun go-ttest--backup-add-field (default-case-str default idx)
+  (while (not (looking-at "},"))
+	(forward-char -1))
+  (let ((is-comment (string-match "//.*}" (thing-at-point 'line t))))
+	(insert "," (format default-case-str (if is-comment "//\t" "") template-idx default)))
+  (forward-line))
+
 (defun go-ttest--add-field (parse name type default)
   "Add a new field (NAME and TYPE) to the table test structure at of PARSE."
   (when (member name (mapcar #'car (go-ttest--table-case-types parse)))
 	(error (format "Field `%s' already exists in struct" name)))
   (goto-char (go-ttest--table-begin-pos parse))
   (let* ((template-idx 1)
-		 (template-format-str "${%d:%s},")
+		 (prev-found nil)
+		 (at-idx 0)
+		 (template-format-str "${%d:%s}")
 		 (base-indent-ct (go-ttest--table-indent-ct parse))
 		 (case-indent-ct (1+ base-indent-ct))
 		 (case-end-regexp (concat (make-string case-indent-ct ?\t) "\\(//\\)?}"))
+		 (case-begin-regexp (concat (make-string case-indent-ct ?\t) "\\(//\\)?{"))
 		 (test-end-regexp (concat (make-string base-indent-ct ?\t) "}"))
 		 (case-indent (make-string (1+ case-indent-ct) ?\t))
 		 (case-defn-str (concat (make-string case-indent-ct ?\t) name " " type))
@@ -421,14 +439,24 @@ DO-FUNC is then ran on applicable lines."
 	(insert case-defn-str)
 	(forward-line 2)
 	(while (not (looking-at test-end-regexp))
+	  (when (looking-at case-begin-regexp)
+		(when (and (> at-idx 0) (not prev-found))
+		  (go-ttest--backup-add-field default-case-str default template-idx)
+		  (setq template-idx (1+ template-idx)))
+		(setq at-idx (1+ at-idx))
+		(setq prev-found nil))
 	  (when (looking-at case-end-regexp)
+		(setq prev-found t)
 		(let ((is-comment (string-match "//}" (thing-at-point 'line t))))
 		  (insert "\n")
 		  (forward-line -1)
-		  (insert (format default-case-str (if is-comment "//\t" "") template-idx default))
+		  (insert (format default-case-str (if is-comment "//\t" "") template-idx default)
+				  ",")
 		  (setq template-idx (1+ template-idx))
 		  (forward-line)))
-	  (forward-line)))
+	  (forward-line))
+	(when (not prev-found)
+	  (go-ttest--backup-add-field default-case-str default template-idx)))
   (goto-char (go-ttest--table-begin-pos parse))
   (setq parse (go-ttest--find-parse))
   (kill-region (point) (go-ttest--table-end-pos parse))
