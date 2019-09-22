@@ -19,7 +19,6 @@ The following is a list of the main commands that go-ttest provides:
   - **U** : Uncomment all tests
   - **o** : Leave only the test at the current point uncommented
 
-![The Test Case Mini-buffer](/images/table-test-menu-png)
 ![Running the o command](/images/o-command.png)
 
 - **go-ttest-add-field** : Propts for the name, type, and default value for a new field to be added. The field is then added to all test cases, using Yasnippet to fill in the value.
