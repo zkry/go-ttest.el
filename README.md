@@ -13,7 +13,7 @@ Currently to install go-ttest you must put the go-ttest.el file somewhere in you
 The following is a list of the main commands that go-ttest provides:
 
 - **go-ttest** : Opens up a buffer showing a list of all of the table tests.  go-ttest will try to infer the name of the test. When in this buffer there are a number of commands at your disposal.
-  - **c*** : Comment out test at point
+  - **c** : Comment out test at point
   - **C** : Comment out all tests
   - **u** : Uncomment the test at point
   - **U** : Uncomment all tests
